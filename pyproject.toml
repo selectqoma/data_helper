@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "data-helper"
+version = "0.1.0"
+description = ""
+authors = ["Dimitri Graur <dimitri.graur@flandersmake.be>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+azure-storage-blob = "^12.24.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+data_helper = "data_helper.__init__:main"
+
