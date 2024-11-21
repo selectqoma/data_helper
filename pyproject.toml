@@ -2,7 +2,7 @@
 name = "data-helper"
 version = "0.1.0"
 description = ""
-authors = ["Dimitri Graur <dimitri.graur@flandersmake.be>"]
+authors = ["Dimitri Graur <dimitri.graur@kapernikov.com>"]
 readme = "README.md"
 
 [tool.poetry.dependencies]
