@@ -2,6 +2,7 @@ import os
 import json
 import argparse
 import getpass
+from datetime import datetime
 from azure.storage.blob import BlobServiceClient
 
 # File to store the configuration
@@ -161,32 +162,105 @@ def delete_folder_from_blob(folder_name):
         blob_client.delete_blob()
         print(f"Deleted {blob.name}")
 
-def create_snapshot(dataset_path, snapshot_name):
-    """Create a snapshot of the dataset."""
+
+def recreate_dataset(snapshot_name, destination):
+    """Recreate a dataset locally from snapshot metadata."""
     connection_string = get_connection_string()
     container_name = get_container_name()
     if not connection_string or not container_name:
         print("Connection string or container name not set. Use 'data_helper connection-string' first.")
         return
 
-    # Use the snapshot name as the top-level folder in Azure Blob
-    snapshot_prefix = f"snapshots/{snapshot_name}/"
+    # Download metadata from Azure Blob Storage
     blob_service_client = BlobServiceClient.from_connection_string(conn_str=connection_string)
     container_client = blob_service_client.get_container_client(container_name)
+    metadata_blob_name = f"snapshots/{snapshot_name}/metadata.json"
+    blob_client = container_client.get_blob_client(metadata_blob_name)
 
-    # Upload the dataset to the snapshot folder
-    for root, _, files in os.walk(dataset_path):
+    try:
+        metadata_content = blob_client.download_blob().readall()
+        snapshot_metadata = json.loads(metadata_content)
+    except Exception as e:
+        print(f"Failed to download metadata: {e}")
+        return
+
+    # Recreate dataset directory structure
+    for split, files in snapshot_metadata["data_splits"].items():
+        split_dir = os.path.join(destination, split)
+        os.makedirs(split_dir, exist_ok=True)
         for file in files:
-            file_path = os.path.join(root, file)
-            blob_name = os.path.join(snapshot_prefix, os.path.relpath(file_path, dataset_path)).replace("\\", "/")
-            blob_client = container_client.get_blob_client(blob_name)
+            file_path = os.path.join(split_dir, os.path.basename(file))
+            open(file_path, "a").close()  # Create an empty file to mimic the structure
 
-            try:
-                with open(file_path, "rb") as data:
-                    blob_client.upload_blob(data, overwrite=True)
-                print(f"Uploaded {file_path} as {blob_name}")
-            except Exception as e:
-                print(f"Failed to upload {file_path}: {e}")
+    for split, annotations in snapshot_metadata["annotations"].items():
+        split_dir = os.path.join(destination, split)
+        for annotation in annotations:
+            annotation_path = os.path.join(split_dir, os.path.basename(annotation))
+            open(annotation_path, "a").close()  # Create an empty annotation file
+
+    print(f"Dataset '{snapshot_name}' recreated at {destination}.")
+
+
+def create_snapshot(dataset_path, snapshot_name):
+    """Create a snapshot containing only metadata about the dataset."""
+    connection_string = get_connection_string()
+    container_name = get_container_name()
+    if not connection_string or not container_name:
+        print("Connection string or container name not set. Use 'data_helper connection-string' first.")
+        return
+
+    # Prepare metadata
+    snapshot_metadata = {
+        "snapshot_name": snapshot_name,
+        "created_at": datetime.now().isoformat(),
+        "description": f"Snapshot of dataset {os.path.basename(dataset_path)}",
+        "data_splits": {
+            "train": [],
+            "val": [],
+            "test": []
+        },
+        "annotations": {
+            "train": [],
+            "val": [],
+            "test": []
+        }
+    }
+
+    # Scan dataset for splits and annotations
+    for split in ["train", "val", "test"]:
+        split_path = os.path.join(dataset_path, split)
+        if os.path.exists(split_path) and os.path.isdir(split_path):
+            for file in os.listdir(split_path):
+                file_path = os.path.join(split_path, file)
+                if file.endswith(".png") and os.path.isfile(file_path):
+                    # Add the image to data_splits
+                    snapshot_metadata["data_splits"][split].append(os.path.join(split, file))
+
+                    # Check for a corresponding annotation file
+                    annotation_file = file.replace(".png", ".txt")
+                    annotation_path = os.path.join(split_path, annotation_file)
+                    if os.path.exists(annotation_path):
+                        snapshot_metadata["annotations"][split].append(os.path.join(split, annotation_file))
+
+    # Save metadata locally
+    local_metadata_file = os.path.join(dataset_path, f"{snapshot_name}_metadata.json")
+    with open(local_metadata_file, "w") as metadata_file:
+        json.dump(snapshot_metadata, metadata_file, indent=4)
+
+    print(f"Metadata saved locally at {local_metadata_file}")
+
+    # Upload metadata to Azure Blob Storage
+    blob_service_client = BlobServiceClient.from_connection_string(conn_str=connection_string)
+    container_client = blob_service_client.get_container_client(container_name)
+    metadata_blob_name = f"snapshots/{snapshot_name}/metadata.json"
+    blob_client = container_client.get_blob_client(metadata_blob_name)
+
+    try:
+        with open(local_metadata_file, "rb") as metadata_file:
+            blob_client.upload_blob(metadata_file, overwrite=True)
+        print(f"Snapshot '{snapshot_name}' created and metadata uploaded to Azure Blob Storage.")
+    except Exception as e:
+        print(f"Failed to upload metadata to Azure Blob Storage: {e}")
 
 
 def list_snapshots():
@@ -268,6 +342,10 @@ def main():
     create_snapshot_parser = snapshot_subparsers.add_parser("snapshot-create")
     create_snapshot_parser.add_argument("dataset_path", help="Path to the dataset to snapshot")
     create_snapshot_parser.add_argument("snapshot_name", help="Name of the snapshot")
+   
+    recreate_snapshot_parser = snapshot_subparsers.add_parser("snapshot-recreate")
+    recreate_snapshot_parser.add_argument("snapshot_name", help="Name of the snapshot to recreate")
+    recreate_snapshot_parser.add_argument("destination", help="Destination path for the recreated dataset")
 
     list_snapshot_parser = snapshot_subparsers.add_parser("snapshot-list", help="List all dataset snapshots")
 
@@ -300,6 +378,8 @@ def main():
             delete_snapshot(args.snapshot_name)
         else:
             parser.print_help()
+    elif args.dataset_command == "snapshot-recreate":
+        recreate_dataset(args.snapshot_name, args.destination)
     else:
         parser.print_help()
 
