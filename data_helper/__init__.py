@@ -4,6 +4,7 @@ import argparse
 import getpass
 from datetime import datetime
 from azure.storage.blob import BlobServiceClient
+import time 
 
 # File to store the configuration
 CONFIG_FILE = os.path.expanduser("~/.data_helper_config.json")
@@ -166,7 +167,7 @@ def delete_folder_from_blob(folder_name):
 def recreate_dataset(snapshot_name, destination="."):
     """
     Recreate a dataset locally from metadata, searching for files in `dataset_name/*****/my_file`.
-    Ignores splits during the search.
+    Ignores splits during the search, optimized for efficiency.
     """
     connection_string = get_connection_string()
     container_name = get_container_name()
@@ -177,7 +178,14 @@ def recreate_dataset(snapshot_name, destination="."):
     # Download metadata from Azure Blob Storage
     blob_service_client = BlobServiceClient.from_connection_string(conn_str=connection_string)
     container_client = blob_service_client.get_container_client(container_name)
-    metadata_blob_name = f"snapshots/{snapshot_name}/metadata.json"
+    
+    # Retrieve the dataset name interactively to find the correct metadata path
+    dataset_name = input("Enter the dataset's name in the blob: ").strip()
+    if not dataset_name:
+        print("Error: Dataset name cannot be empty.")
+        return
+
+    metadata_blob_name = f"snapshots/{dataset_name}/{snapshot_name}/metadata.json"
     blob_client = container_client.get_blob_client(metadata_blob_name)
 
     try:
@@ -193,26 +201,33 @@ def recreate_dataset(snapshot_name, destination="."):
         print(f"Error: 'dataset_name' not found in metadata for snapshot '{snapshot_name}'.")
         return
 
+    # Preload all blob names under dataset_name into a dictionary
+    print("Preloading blob list for efficient search...")
+    start_time = time.time()
+    blob_dict = {blob.name.split("/")[-1]: blob.name for blob in container_client.list_blobs(name_starts_with=f"{dataset_name}/")}
+    print(f"Preloading completed in {time.time() - start_time:.2f} seconds.")
+
     # Create a folder named after the snapshot in the destination directory
     dataset_destination = os.path.join(destination, dataset_name)
     os.makedirs(dataset_destination, exist_ok=True)
+    os.makedirs(os.path.join(dataset_destination, 'train'), exist_ok=True)
+    os.makedirs(os.path.join(dataset_destination, 'val'), exist_ok=True)
+    os.makedirs(os.path.join(dataset_destination, 'test'), exist_ok=True)
 
-    # Helper function to search for a file in dataset_name/
-    def find_blob(container_client, dataset_name, file_name):
-        matching_blobs = container_client.list_blobs(name_starts_with=f"{dataset_name}/")
-        for blob in matching_blobs:
-            if file_name in blob.name:  # Check if file_name is part of the blob path
-                return blob.name
-        return None
+    # Helper function to find a blob name
+    def find_blob(file_name):
+        return blob_dict.get(file_name, None)
 
     # Recreate dataset structure and download files
     for split, files in snapshot_metadata["data_splits"].items():
         for file in files:
             file_name = os.path.basename(file)  # Extract the file name
-            matched_blob = find_blob(container_client, dataset_name, file_name)
+            s = time.time()
+            matched_blob = find_blob(file_name)
+            print('time to find a blob = ', time.time() - s)
 
             if matched_blob:
-                local_file_path = os.path.join(dataset_destination, file_name)
+                local_file_path = os.path.join(dataset_destination, split, file_name)
                 try:
                     # Download the matched blob
                     blob_client = container_client.get_blob_client(matched_blob)
@@ -226,13 +241,12 @@ def recreate_dataset(snapshot_name, destination="."):
 
     for split, annotations in snapshot_metadata["annotations"].items():
         for annotation in annotations:
-            annotation_name = os.path.basename(annotation)  # Extract the annotation name
-            matched_blob = find_blob(container_client, dataset_name, annotation_name)
+            annotation_name = os.path.basename(annotation) 
+            matched_blob = find_blob(annotation_name)
 
             if matched_blob:
-                local_file_path = os.path.join(dataset_destination, annotation_name)
+                local_file_path = os.path.join(dataset_destination, split, annotation_name)
                 try:
-                    # Download the matched blob
                     blob_client = container_client.get_blob_client(matched_blob)
                     with open(local_file_path, "wb") as local_file:
                         local_file.write(blob_client.download_blob().readall())
@@ -243,8 +257,6 @@ def recreate_dataset(snapshot_name, destination="."):
                 print(f"Warning: No match found for {annotation_name} in dataset '{dataset_name}'.")
 
     print(f"Dataset '{dataset_name}' recreated with data at {dataset_destination}.")
-
-
 
 def create_snapshot(dataset_path, snapshot_name):
     """Create a snapshot containing only metadata about the dataset."""
