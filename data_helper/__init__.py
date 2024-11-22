@@ -164,7 +164,7 @@ def delete_folder_from_blob(folder_name):
 
 
 def recreate_dataset(snapshot_name, destination):
-    """Recreate a dataset locally from snapshot metadata."""
+    """Recreate a dataset locally from snapshot metadata and download the relevant data from Azure Blob Storage."""
     connection_string = get_connection_string()
     container_name = get_container_name()
     if not connection_string or not container_name:
@@ -184,25 +184,50 @@ def recreate_dataset(snapshot_name, destination):
         print(f"Failed to download metadata: {e}")
         return
 
-    # Recreate dataset directory structure
+    # Recreate dataset structure and download files
     for split, files in snapshot_metadata["data_splits"].items():
         split_dir = os.path.join(destination, split)
         os.makedirs(split_dir, exist_ok=True)
         for file in files:
-            file_path = os.path.join(split_dir, os.path.basename(file))
-            open(file_path, "a").close()  # Create an empty file to mimic the structure
+            blob_name = file.replace("\\", "/")  # Ensure proper blob path
+            local_file_path = os.path.join(split_dir, os.path.basename(file))
+
+            try:
+                # Download blob
+                blob_client = container_client.get_blob_client(blob_name)
+                with open(local_file_path, "wb") as file:
+                    file.write(blob_client.download_blob().readall())
+                print(f"Downloaded {blob_name} to {local_file_path}")
+            except Exception as e:
+                print(f"Failed to download {blob_name}: {e}")
 
     for split, annotations in snapshot_metadata["annotations"].items():
         split_dir = os.path.join(destination, split)
+        os.makedirs(split_dir, exist_ok=True)
         for annotation in annotations:
-            annotation_path = os.path.join(split_dir, os.path.basename(annotation))
-            open(annotation_path, "a").close()  # Create an empty annotation file
+            blob_name = annotation.replace("\\", "/")  # Ensure proper blob path
+            local_file_path = os.path.join(split_dir, os.path.basename(annotation))
 
-    print(f"Dataset '{snapshot_name}' recreated at {destination}.")
+            try:
+                # Download blob
+                blob_client = container_client.get_blob_client(blob_name)
+                with open(local_file_path, "wb") as file:
+                    file.write(blob_client.download_blob().readall())
+                print(f"Downloaded {blob_name} to {local_file_path}")
+            except Exception as e:
+                print(f"Failed to download {blob_name}: {e}")
+
+    print(f"Dataset '{snapshot_name}' recreated with data at {destination}.")
+
 
 
 def create_snapshot(dataset_path, snapshot_name):
     """Create a snapshot containing only metadata about the dataset."""
+    # Check if the dataset already exists in Azure Blob Storage
+    if check_dataset_exists(dataset_path):
+        print(f"Snapshot not created. Dataset '{dataset_path}' already exists in Azure Blob Storage.")
+        return
+
     connection_string = get_connection_string()
     container_name = get_container_name()
     if not connection_string or not container_name:
@@ -262,7 +287,6 @@ def create_snapshot(dataset_path, snapshot_name):
     except Exception as e:
         print(f"Failed to upload metadata to Azure Blob Storage: {e}")
 
-
 def list_snapshots():
     """List all dataset snapshots."""
     connection_string = get_connection_string()
@@ -310,6 +334,40 @@ def delete_snapshot(snapshot_name):
 
     print(f"Snapshot '{snapshot_name}' deleted successfully.")
 
+def check_dataset_exists(dataset_path):
+    """Check if a dataset with the same file paths exists in Azure Blob Storage."""
+    connection_string = get_connection_string()
+    container_name = get_container_name()
+    if not connection_string or not container_name:
+        print("Connection string or container name not set. Use 'data_helper connection-string' first.")
+        return False
+
+    blob_service_client = BlobServiceClient.from_connection_string(conn_str=connection_string)
+    container_client = blob_service_client.get_container_client(container_name)
+
+    # Get all blob names in the container
+    existing_blobs = set(blob.name for blob in container_client.list_blobs())
+    
+    # Collect all dataset paths
+    dataset_files = []
+    for root, _, files in os.walk(dataset_path):
+        for file in files:
+            relative_path = os.path.relpath(os.path.join(root, file), dataset_path).replace("\\", "/")
+            dataset_files.append(relative_path)
+
+    # Check if all dataset paths exist in blob storage
+    missing_files = [file for file in dataset_files if file not in existing_blobs]
+
+    if not missing_files:
+        print("Dataset already exists in Azure Blob Storage with the same file paths.")
+        return True
+    else:
+        print("The following files are missing in blob storage:")
+        for missing_file in missing_files:
+            print(missing_file)
+        return False
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(description="Data Helper CLI")
@@ -339,10 +397,12 @@ def main():
     snapshot_parser = subparsers.add_parser("dataset")
     snapshot_subparsers = snapshot_parser.add_subparsers(dest="dataset_command")
 
+    # Existing commands (e.g., snapshot-create, snapshot-list, etc.)
     create_snapshot_parser = snapshot_subparsers.add_parser("snapshot-create")
     create_snapshot_parser.add_argument("dataset_path", help="Path to the dataset to snapshot")
     create_snapshot_parser.add_argument("snapshot_name", help="Name of the snapshot")
-   
+
+    # Add the recreate snapshot command
     recreate_snapshot_parser = snapshot_subparsers.add_parser("snapshot-recreate")
     recreate_snapshot_parser.add_argument("snapshot_name", help="Name of the snapshot to recreate")
     recreate_snapshot_parser.add_argument("destination", help="Destination path for the recreated dataset")
@@ -376,10 +436,10 @@ def main():
             list_snapshots()
         elif args.dataset_command == "snapshot-delete":
             delete_snapshot(args.snapshot_name)
+        elif args.dataset_command == "snapshot-recreate":
+            recreate_dataset(args.snapshot_name, args.destination)
         else:
             parser.print_help()
-    elif args.dataset_command == "snapshot-recreate":
-        recreate_dataset(args.snapshot_name, args.destination)
     else:
         parser.print_help()
 
