@@ -163,13 +163,20 @@ def delete_folder_from_blob(folder_name):
         print(f"Deleted {blob.name}")
 
 
-def recreate_dataset(snapshot_name, destination):
-    """Recreate a dataset locally from snapshot metadata and download the relevant data from Azure Blob Storage."""
+def recreate_dataset(snapshot_name, destination="."):
+    """
+    Recreate a dataset locally from snapshot metadata and download matching files
+    from Azure Blob Storage. Automatically handles searching for files using patterns.
+    """
     connection_string = get_connection_string()
     container_name = get_container_name()
     if not connection_string or not container_name:
         print("Connection string or container name not set. Use 'data_helper connection-string' first.")
         return
+
+    # Create a folder named after the snapshot in the destination directory
+    snapshot_destination = os.path.join(destination, snapshot_name)
+    os.makedirs(snapshot_destination, exist_ok=True)
 
     # Download metadata from Azure Blob Storage
     blob_service_client = BlobServiceClient.from_connection_string(conn_str=connection_string)
@@ -186,43 +193,76 @@ def recreate_dataset(snapshot_name, destination):
 
     # Recreate dataset structure and download files
     for split, files in snapshot_metadata["data_splits"].items():
-        split_dir = os.path.join(destination, split)
+        split_dir = os.path.join(snapshot_destination, split)
         os.makedirs(split_dir, exist_ok=True)
-        for file in files:
-            blob_name = file.replace("\\", "/")  # Ensure proper blob path
-            local_file_path = os.path.join(split_dir, os.path.basename(file))
 
-            try:
-                # Download blob
-                blob_client = container_client.get_blob_client(blob_name)
-                with open(local_file_path, "wb") as file:
-                    file.write(blob_client.download_blob().readall())
-                print(f"Downloaded {blob_name} to {local_file_path}")
-            except Exception as e:
-                print(f"Failed to download {blob_name}: {e}")
+        for file in files:
+            # Extract the file name and search pattern
+            file_name = os.path.basename(file)
+            matching_blobs = container_client.list_blobs(name_starts_with=f"{split}/")
+
+            # Find the blob that matches the file name (wildcard search)
+            matched_blob = None
+            for blob in matching_blobs:
+                if file_name in blob.name:  # Simple substring search for matching file
+                    matched_blob = blob.name
+                    break
+
+            if matched_blob:
+                local_file_path = os.path.join(split_dir, file_name)
+                try:
+                    # Download the matched blob
+                    blob_client = container_client.get_blob_client(matched_blob)
+                    with open(local_file_path, "wb") as local_file:
+                        local_file.write(blob_client.download_blob().readall())
+                    print(f"Downloaded {matched_blob} to {local_file_path}")
+                except Exception as e:
+                    print(f"Failed to download {matched_blob}: {e}")
+            else:
+                print(f"Warning: No match found for {file_name} in split '{split}'.")
 
     for split, annotations in snapshot_metadata["annotations"].items():
-        split_dir = os.path.join(destination, split)
+        split_dir = os.path.join(snapshot_destination, split)
         os.makedirs(split_dir, exist_ok=True)
+
         for annotation in annotations:
-            blob_name = annotation.replace("\\", "/")  # Ensure proper blob path
-            local_file_path = os.path.join(split_dir, os.path.basename(annotation))
+            # Extract the annotation name and search pattern
+            annotation_name = os.path.basename(annotation)
+            matching_blobs = container_client.list_blobs(name_starts_with=f"{split}/")
 
-            try:
-                # Download blob
-                blob_client = container_client.get_blob_client(blob_name)
-                with open(local_file_path, "wb") as file:
-                    file.write(blob_client.download_blob().readall())
-                print(f"Downloaded {blob_name} to {local_file_path}")
-            except Exception as e:
-                print(f"Failed to download {blob_name}: {e}")
+            # Find the blob that matches the annotation name (wildcard search)
+            matched_blob = None
+            for blob in matching_blobs:
+                if annotation_name in blob.name:  # Simple substring search for matching file
+                    matched_blob = blob.name
+                    break
 
-    print(f"Dataset '{snapshot_name}' recreated with data at {destination}.")
+            if matched_blob:
+                local_file_path = os.path.join(split_dir, annotation_name)
+                try:
+                    # Download the matched blob
+                    blob_client = container_client.get_blob_client(matched_blob)
+                    with open(local_file_path, "wb") as local_file:
+                        local_file.write(blob_client.download_blob().readall())
+                    print(f"Downloaded {matched_blob} to {local_file_path}")
+                except Exception as e:
+                    print(f"Failed to download {matched_blob}: {e}")
+            else:
+                print(f"Warning: No match found for {annotation_name} in split '{split}'.")
+
+    print(f"Dataset '{snapshot_name}' recreated with data at {snapshot_destination}.")
+
 
 
 
 def create_snapshot(dataset_path, snapshot_name):
     """Create a snapshot containing only metadata about the dataset."""
+    # Ask for the dataset name in the blob
+    dataset_name = input("Enter the dataset's name in the blob: ").strip()
+    if not dataset_name:
+        print("Error: Dataset name cannot be empty.")
+        return
+
     # Check if the dataset already exists in Azure Blob Storage
     if check_dataset_exists(dataset_path):
         print(f"Snapshot not created. Dataset '{dataset_path}' already exists in Azure Blob Storage.")
@@ -277,16 +317,17 @@ def create_snapshot(dataset_path, snapshot_name):
     # Upload metadata to Azure Blob Storage
     blob_service_client = BlobServiceClient.from_connection_string(conn_str=connection_string)
     container_client = blob_service_client.get_container_client(container_name)
-    metadata_blob_name = f"snapshots/{snapshot_name}/metadata.json"
+    metadata_blob_name = f"snapshots/{dataset_name}/{snapshot_name}/metadata.json"
     blob_client = container_client.get_blob_client(metadata_blob_name)
 
     try:
         with open(local_metadata_file, "rb") as metadata_file:
             blob_client.upload_blob(metadata_file, overwrite=True)
-        print(f"Snapshot '{snapshot_name}' created and metadata uploaded to Azure Blob Storage.")
+        print(f"Snapshot '{snapshot_name}' created and metadata uploaded to Azure Blob Storage in '{dataset_name}' directory.")
     except Exception as e:
         print(f"Failed to upload metadata to Azure Blob Storage: {e}")
 
+        
 def list_snapshots():
     """List all dataset snapshots."""
     connection_string = get_connection_string()
