@@ -10,6 +10,7 @@ python = "^3.12"
 azure-storage-blob = "^12.24.0"
 
 
+fiftyone = "^1.0.2"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

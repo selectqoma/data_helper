@@ -4,7 +4,9 @@ import argparse
 import getpass
 from datetime import datetime
 from azure.storage.blob import BlobServiceClient
-import time 
+from fiftyone import Dataset
+from fiftyone.utils.yolo import YOLOv5DatasetImporter
+import fiftyone as fo
 
 # File to store the configuration
 CONFIG_FILE = os.path.expanduser("~/.data_helper_config.json")
@@ -168,6 +170,7 @@ def recreate_dataset(snapshot_name, destination="."):
     """
     Recreate a dataset locally from metadata, searching for files in `dataset_name/*****/my_file`.
     Ignores splits during the search, optimized for efficiency.
+    Skips downloading files if they already exist locally.
     """
     connection_string = get_connection_string()
     container_name = get_container_name()
@@ -203,9 +206,7 @@ def recreate_dataset(snapshot_name, destination="."):
 
     # Preload all blob names under dataset_name into a dictionary
     print("Preloading blob list for efficient search...")
-    start_time = time.time()
     blob_dict = {blob.name.split("/")[-1]: blob.name for blob in container_client.list_blobs(name_starts_with=f"{dataset_name}/")}
-    print(f"Preloading completed in {time.time() - start_time:.2f} seconds.")
 
     # Create a folder named after the snapshot in the destination directory
     dataset_destination = os.path.join(destination, dataset_name)
@@ -222,12 +223,16 @@ def recreate_dataset(snapshot_name, destination="."):
     for split, files in snapshot_metadata["data_splits"].items():
         for file in files:
             file_name = os.path.basename(file)  # Extract the file name
-            s = time.time()
+            local_file_path = os.path.join(dataset_destination, split, file_name)
+            
+            # Skip download if the file already exists locally
+            if os.path.exists(local_file_path):
+                print(f"File already exists, skipping: {local_file_path}")
+                continue
+
             matched_blob = find_blob(file_name)
-            print('time to find a blob = ', time.time() - s)
 
             if matched_blob:
-                local_file_path = os.path.join(dataset_destination, split, file_name)
                 try:
                     # Download the matched blob
                     blob_client = container_client.get_blob_client(matched_blob)
@@ -242,10 +247,16 @@ def recreate_dataset(snapshot_name, destination="."):
     for split, annotations in snapshot_metadata["annotations"].items():
         for annotation in annotations:
             annotation_name = os.path.basename(annotation) 
+            local_file_path = os.path.join(dataset_destination, split, annotation_name)
+            
+            # Skip download if the annotation file already exists locally
+            if os.path.exists(local_file_path):
+                print(f"Annotation already exists, skipping: {local_file_path}")
+                continue
+
             matched_blob = find_blob(annotation_name)
 
             if matched_blob:
-                local_file_path = os.path.join(dataset_destination, split, annotation_name)
                 try:
                     blob_client = container_client.get_blob_client(matched_blob)
                     with open(local_file_path, "wb") as local_file:
@@ -413,6 +424,23 @@ def check_dataset_exists(dataset_path):
             print(missing_file)
         return False
 
+def view_dataset(dataset_path):
+    """
+    Visualize a YOLOv5 dataset using FiftyOne.
+    """
+    try:
+        # Load the YOLOv5 dataset using FiftyOne
+        dataset = fo.Dataset.from_dir(
+            dataset_type=fo.types.YOLOv5Dataset,
+            dataset_dir=dataset_path,
+        )
+        print(f"Dataset '{dataset.name}' loaded. Launching FiftyOne app...")
+        # Launch the FiftyOne app
+        session = fo.launch_app(dataset)
+        session.wait()
+    except Exception as e:
+        print(f"Error viewing dataset: {e}")
+
 
 def main():
     """Main CLI entry point."""
@@ -430,7 +458,6 @@ def main():
     upload_parser.add_argument("folder", help="Folder path to upload")
 
     list_parser = blob_subparsers.add_parser("list", help="List all blobs")
-
     listdir_parser = blob_subparsers.add_parser("listdir", help="List all top-level folders in the container")
 
     download_parser = blob_subparsers.add_parser("download")
@@ -443,12 +470,13 @@ def main():
     snapshot_parser = subparsers.add_parser("dataset")
     snapshot_subparsers = snapshot_parser.add_subparsers(dest="dataset_command")
 
-    # Existing commands (e.g., snapshot-create, snapshot-list, etc.)
+    view_dataset_parser = snapshot_subparsers.add_parser("view", help="View YOLOv dataset")
+    view_dataset_parser.add_argument("dataset_path", help="Path to the dataset to view")
+
     create_snapshot_parser = snapshot_subparsers.add_parser("snapshot-create")
     create_snapshot_parser.add_argument("dataset_path", help="Path to the dataset to snapshot")
     create_snapshot_parser.add_argument("snapshot_name", help="Name of the snapshot")
 
-    # Add the recreate snapshot command
     recreate_snapshot_parser = snapshot_subparsers.add_parser("snapshot-recreate")
     recreate_snapshot_parser.add_argument("snapshot_name", help="Name of the snapshot to recreate")
     recreate_snapshot_parser.add_argument("destination", help="Destination path for the recreated dataset")
@@ -476,7 +504,9 @@ def main():
         else:
             parser.print_help()
     elif args.command == "dataset":
-        if args.dataset_command == "snapshot-create":
+        if args.dataset_command == "view":
+            view_dataset(args.dataset_path)
+        elif args.dataset_command == "snapshot-create":
             create_snapshot(args.dataset_path, args.snapshot_name)
         elif args.dataset_command == "snapshot-list":
             list_snapshots()
