@@ -7,9 +7,50 @@ from azure.storage.blob import BlobServiceClient
 from fiftyone import Dataset
 from fiftyone.utils.yolo import YOLOv5DatasetImporter
 import fiftyone as fo
+import fiftyone.utils.yolo as fouy
+import yaml
 
 # File to store the configuration
 CONFIG_FILE = os.path.expanduser("~/.data_helper_config.json")
+
+class CustomYOLOv5DatasetImporter(fouy.YOLOv5DatasetImporter):
+    def __init__(
+        self,
+        dataset_dir=None,
+        yaml_path=None,
+        split="val",
+        label_type="detections",
+        include_all_data=False,
+        shuffle=False,
+        seed=None,
+        max_samples=None,
+    ):
+        """
+        Initialize the custom importer with the same parameters as the base class.
+        """
+        print(f"Initializing with dataset_dir={dataset_dir}, yaml_path={yaml_path}")
+        super().__init__(
+            dataset_dir=dataset_dir,
+            yaml_path=yaml_path,
+            split=split,
+            label_type=label_type,
+            include_all_data=include_all_data,
+            shuffle=shuffle,
+            seed=seed,
+            max_samples=max_samples,
+        )
+
+    def _parse_labels_path(self, image_path):
+        """
+        Override the logic to locate labels for your custom folder structure.
+        """
+        # Replace logic with your dataset-specific label paths
+        label_path = image_path.replace(".png", ".txt")  # Assuming `.txt` annotations
+        label_path = label_path.replace("/train/images/", "/train/labels/")
+        label_path = label_path.replace("/val/images/", "/val/labels/")
+        label_path = label_path.replace("/test/images/", "/test/labels/")
+        return label_path
+
 
 def load_config():
     """Load configuration from the config file."""
@@ -168,7 +209,7 @@ def delete_folder_from_blob(folder_name):
 
 def recreate_dataset(snapshot_name, destination="."):
     """
-    Recreate a dataset locally from metadata, searching for files in `dataset_name/*****/my_file`.
+    Recreate a YOLO dataset locally from metadata, searching for files in `dataset_name/*****/my_file`.
     Ignores splits during the search, optimized for efficiency.
     Skips downloading files if they already exist locally.
     """
@@ -204,16 +245,19 @@ def recreate_dataset(snapshot_name, destination="."):
         print(f"Error: 'dataset_name' not found in metadata for snapshot '{snapshot_name}'.")
         return
 
+    # Extract class names and number of classes
+    class_names = snapshot_metadata.get("class_names", [])
+    num_classes = len(class_names)
+
     # Preload all blob names under dataset_name into a dictionary
     print("Preloading blob list for efficient search...")
     blob_dict = {blob.name.split("/")[-1]: blob.name for blob in container_client.list_blobs(name_starts_with=f"{dataset_name}/")}
 
-    # Create a folder named after the snapshot in the destination directory
+    # Create the YOLO folder structure
     dataset_destination = os.path.join(destination, dataset_name)
-    os.makedirs(dataset_destination, exist_ok=True)
-    os.makedirs(os.path.join(dataset_destination, 'train'), exist_ok=True)
-    os.makedirs(os.path.join(dataset_destination, 'val'), exist_ok=True)
-    os.makedirs(os.path.join(dataset_destination, 'test'), exist_ok=True)
+    for split in ['train', 'val', 'test']:
+        os.makedirs(os.path.join(dataset_destination, split, 'images'), exist_ok=True)
+        os.makedirs(os.path.join(dataset_destination, split, 'labels'), exist_ok=True)
 
     # Helper function to find a blob name
     def find_blob(file_name):
@@ -223,11 +267,11 @@ def recreate_dataset(snapshot_name, destination="."):
     for split, files in snapshot_metadata["data_splits"].items():
         for file in files:
             file_name = os.path.basename(file)  # Extract the file name
-            local_file_path = os.path.join(dataset_destination, split, file_name)
+            local_file_path = os.path.join(dataset_destination, split, 'images', file_name)
             
             # Skip download if the file already exists locally
             if os.path.exists(local_file_path):
-                print(f"File already exists, skipping: {local_file_path}")
+                print(f"Image already exists, skipping: {local_file_path}")
                 continue
 
             matched_blob = find_blob(file_name)
@@ -247,11 +291,11 @@ def recreate_dataset(snapshot_name, destination="."):
     for split, annotations in snapshot_metadata["annotations"].items():
         for annotation in annotations:
             annotation_name = os.path.basename(annotation) 
-            local_file_path = os.path.join(dataset_destination, split, annotation_name)
+            local_file_path = os.path.join(dataset_destination, split, 'labels', annotation_name)
             
             # Skip download if the annotation file already exists locally
             if os.path.exists(local_file_path):
-                print(f"Annotation already exists, skipping: {local_file_path}")
+                print(f"Label already exists, skipping: {local_file_path}")
                 continue
 
             matched_blob = find_blob(annotation_name)
@@ -267,7 +311,8 @@ def recreate_dataset(snapshot_name, destination="."):
             else:
                 print(f"Warning: No match found for {annotation_name} in dataset '{dataset_name}'.")
 
-    print(f"Dataset '{dataset_name}' recreated with data at {dataset_destination}.")
+    print(f"YOLO dataset '{dataset_name}' recreated with data at {dataset_destination}.")
+
 
 def create_snapshot(dataset_path, snapshot_name):
     """Create a snapshot containing only metadata about the dataset."""
@@ -424,23 +469,49 @@ def check_dataset_exists(dataset_path):
             print(missing_file)
         return False
 
-def view_dataset(dataset_path):
+
+def view_dataset(dataset_dir):
     """
-    Visualize a YOLOv5 dataset using FiftyOne.
+    Visualize all splits ('train', 'val', 'test') of a YOLOv5 dataset using FiftyOne.
     """
     try:
-        # Load the YOLOv5 dataset using FiftyOne
-        dataset = fo.Dataset.from_dir(
-            dataset_type=fo.types.YOLOv5Dataset,
-            dataset_dir=dataset_path,
-        )
-        print(f"Dataset '{dataset.name}' loaded. Launching FiftyOne app...")
+        # Check if dataset directory exists
+        if not os.path.exists(dataset_dir):
+            raise FileNotFoundError(f"Dataset directory '{dataset_dir}' does not exist.")
+
+        # Ensure the correct path for `dataset.yaml`
+        yaml_path = os.path.join(dataset_dir, "dataset.yaml")
+        if not os.path.isfile(yaml_path):
+            raise FileNotFoundError(f"`dataset.yaml` not found in '{dataset_dir}'.")
+
+        # Create an empty FiftyOne dataset
+        dataset = fo.Dataset(name=f"{os.path.basename(dataset_dir)}")
+        
+        # Load all splits into the same dataset
+        for split in ["train", "val", "test"]:
+            print(f"Loading {split} split...")
+            split_dataset = fo.Dataset.from_dir(
+                dataset_dir=dataset_dir,
+                dataset_type=fo.types.YOLOv5Dataset,
+                yaml_path='dataset.yaml',
+                split=split,
+            )
+
+            # Tag the samples with the split name (e.g., "train", "val", "test")
+            split_dataset.tag_samples(split)
+
+            # Add the split's samples to the main dataset
+            dataset.add_samples(split_dataset)
+
+        print(f"Dataset loaded with all splits: train, val, test.")
+        print(f"Total samples: {len(dataset)}")
+
         # Launch the FiftyOne app
+        print("Launching FiftyOne app...")
         session = fo.launch_app(dataset)
         session.wait()
     except Exception as e:
         print(f"Error viewing dataset: {e}")
-
 
 def main():
     """Main CLI entry point."""
